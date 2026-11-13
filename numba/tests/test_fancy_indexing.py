@@ -545,5 +545,148 @@ class TestFancyIndexingMultiDim(MemoryLeakMixin, TestCase):
             with self.subTest(idx=idx):
                 self.check_setitem_indices(self.shape, idx)
 
+class TestBooleanFancyIndexing(MemoryLeakMixin, TestCase):
+    def test_separated_mask_placement(self):
+        @njit
+        def getitem(a, index):
+            return a[index]
+
+        @njit
+        def setitem(a, index, value):
+            a[index] = value
+
+        a = np.arange(24).reshape(2, 3, 4)
+        mask = np.array([True, False, False, True])
+        for index in ((1, slice(None), mask),
+                      (None, 1, slice(None), mask),
+                      (Ellipsis, 1, mask)):
+            with self.subTest(index=index):
+                expected = a[index]
+                np.testing.assert_array_equal(getitem(a, index), expected)
+                value = np.arange(expected.size).reshape(expected.shape)
+                expected = a.copy()
+                actual = a.copy()
+                expected[index] = value
+                setitem(actual, index, value)
+                self.assertPreciseEqual(actual, expected)
+
+    def test_paired_masks(self):
+        @njit
+        def getitem(a, rows, columns):
+            return a[rows, columns]
+
+        @njit
+        def setitem(a, rows, columns, values):
+            a[rows, columns] = values
+
+        a = np.arange(9).reshape(3, 3)
+        rows = np.array([True, False, True])
+        columns = np.array([False, True, True])
+        self.assertPreciseEqual(getitem(a, rows, columns), a[rows, columns])
+        expected = a.copy()
+        actual = a.copy()
+        expected[rows, columns] = 99
+        setitem(actual, rows, columns, 99)
+        self.assertPreciseEqual(actual, expected)
+        values = np.array([7, 11])
+        expected[rows, columns] = values
+        setitem(actual, rows, columns, values)
+        self.assertPreciseEqual(actual, expected)
+
+    def test_broadcast_mask_and_integer_indices(self):
+        @njit
+        def getitem(a, rows, columns):
+            return a[rows, columns]
+
+        a = np.arange(9).reshape(3, 3)
+        rows = np.array([False, True, False])
+        columns = np.array([[0], [2]])
+        self.assertPreciseEqual(getitem(a, rows, columns), a[rows, columns])
+
+    def test_multidimensional_mask(self):
+        @njit
+        def getitem(a, mask):
+            return a[mask]
+
+        @njit
+        def setitem(a, mask, value):
+            a[mask] = value
+
+        a = np.arange(6).reshape(2, 3)
+        mask = a > 2
+        self.assertPreciseEqual(getitem(a, mask), a[mask])
+        expected = a.copy()
+        actual = a.copy()
+        expected[mask] = 99
+        setitem(actual, mask, 99)
+        self.assertPreciseEqual(actual, expected)
+
+    def test_strided_readonly_mask(self):
+        @njit
+        def getitem(a, mask):
+            return a[1, :, mask]
+
+        a = np.arange(24).reshape(2, 3, 4)
+        mask = np.array([True, False, False, True])[::-1]
+        mask.setflags(write=False)
+        self.assertPreciseEqual(getitem(a, mask), getitem.py_func(a, mask))
+
+    def test_mask_aliases_assignment_target(self):
+        @njit
+        def setitem(a):
+            a[a[:, 0], a[0, :]] = False
+
+        a = np.array([[True, True, False],
+                      [True, True, True],
+                      [False, True, True]])
+        expected = a.copy()
+        setitem.py_func(expected)
+        setitem(a)
+        self.assertPreciseEqual(a, expected)
+
+    def test_overlapping_row_assignment(self):
+        # Original input from TheTesla's PR #10955: an integer index removes
+        # an output axis without removing its physical overlap bounds.
+        @njit
+        def setitem(a):
+            a[1, 3:6] = a[1, 2:5]
+
+        a = np.array([[3, 7, 1, 0, 0, 0, 0, 0],
+                      [4, 3, 4, 6, 5, 0, 0, 0]])
+        expected = a.copy()
+        setitem.py_func(expected)
+        setitem(a)
+        self.assertPreciseEqual(a, expected)
+
+    def test_parallel_multidimensional_assignment(self):
+        @njit(parallel=True)
+        def setitem(a, mask):
+            a[mask] = 99
+
+        a = np.arange(6).reshape(2, 3)
+        mask = a > 2
+        expected = a.copy()
+        setitem.py_func(expected, mask)
+        setitem(a, mask)
+        self.assertPreciseEqual(a, expected)
+
+
+class TestBooleanFancyIndexErrors(TestCase):
+    def test_invalid_boolean_indices(self):
+        @njit
+        def getitem(a, index):
+            return a[index]
+
+        a = np.arange(6).reshape(2, 3)
+        with self.assertRaisesRegex(TypingError, "Zero-dimensional boolean"):
+            getitem(a, np.array(True))
+        with self.assertRaisesRegex(IndexError, "boolean index did not match"):
+            getitem(a, np.array([True]))
+        with self.assertRaisesRegex(IndexError, "boolean index did not match"):
+            getitem(a, np.zeros((0, 4), dtype=np.bool_))
+        empty = np.zeros((0, 3), dtype=np.bool_)
+        self.assertPreciseEqual(getitem(a, empty), a[empty])
+
+
 if __name__ == '__main__':
     unittest.main()

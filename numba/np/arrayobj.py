@@ -911,95 +911,6 @@ class IntegerArrayIndexer(Indexer):
         return ()
 
 
-class BooleanArrayIndexer(Indexer):
-    """
-    Compute indices from an array of boolean predicates.
-    """
-
-    def __init__(self, context, builder, idxty, idxary):
-        self.context = context
-        self.builder = builder
-        self.idxty = idxty
-        self.idxary = idxary
-        assert idxty.ndim == 1
-        self.ll_intp = self.context.get_value_type(types.intp)
-        self.zero = Constant(self.ll_intp, 0)
-
-    def prepare(self):
-        builder = self.builder
-        self.size = cgutils.unpack_tuple(builder, self.idxary.shape)[0]
-        self.idx_index = cgutils.alloca_once(builder, self.ll_intp)
-        self.src_idx = cgutils.alloca_once(builder, self.ll_intp)
-
-        self.bb_start = builder.append_basic_block()
-        self.bb_tail = builder.append_basic_block()
-        self.bb_end = builder.append_basic_block()
-
-    def get_size(self):
-        builder = self.builder
-        count = cgutils.alloca_once_value(builder, self.zero)
-        # Sum all true values
-        with cgutils.for_range(builder, self.size) as loop:
-            c = builder.load(count)
-            pred = _getitem_array_single_int(
-                self.context, builder, self.idxty.dtype,
-                self.idxty, self.idxary, loop.index
-            )
-            c = builder.add(c, builder.zext(pred, c.type))
-            builder.store(c, count)
-
-        return builder.load(count)
-
-    def get_shape(self):
-        return (self.get_size(),)
-
-    def get_index_bounds(self):
-        # Pessimal heuristic, as we don't want to scan for the
-        # first and last true items
-        return (self.ll_intp(0), self.size)
-
-    def loop_head(self):
-        builder = self.builder
-        # Initialize loop variable
-        self.builder.store(self.zero, self.idx_index)
-        self.builder.store(self.zero, self.src_idx)
-        builder.branch(self.bb_start)
-        builder.position_at_end(self.bb_start)
-        cur_index = builder.load(self.idx_index)
-        with builder.if_then(builder.icmp_signed('>=', cur_index, self.size),
-                             likely=False):
-            builder.branch(self.bb_end)
-        # Load the predicate and branch if false
-        pred = _getitem_array_single_int(
-            self.context, builder, self.idxty.dtype, self.idxty, self.idxary,
-            cur_index
-        )
-        with builder.if_then(builder.not_(pred)):
-            builder.branch(self.bb_tail)
-        return cur_index
-
-    def loop_tail(self):
-        builder = self.builder
-        src_idx = cgutils.increment_index(
-            builder,
-            builder.load(self.src_idx)
-        )
-        builder.store(src_idx, self.src_idx)
-        builder.branch(self.bb_tail)
-        builder.position_at_end(self.bb_tail)
-        next_index = cgutils.increment_index(
-            builder,
-            builder.load(self.idx_index)
-        )
-        builder.store(next_index, self.idx_index)
-        builder.branch(self.bb_start)
-        builder.position_at_end(self.bb_end)
-
-    def get_src_idx(self):
-        # TODO: Implement own addition src index
-        return (self.builder.load(self.src_idx),)
-
-
 class SliceIndexer(Indexer):
     """
     Compute indices along a slice.
@@ -1173,11 +1084,19 @@ class FancyIndexer(object):
         indexers = []
         num_newaxes = len([idx for idx in index_types if is_nonelike(idx)])
         ax = 0 # keeps track of position of original axes
-        new_ax = 0 # keeps track of position for inserting new axes
+        new_ax = 0 # output position before adding the advanced subspace
         self.newaxes = []
+        num_subspaces = 0
+        in_subspace = False
+        subspace_index = None
+        subspace_output_index = None
+        has_array_index = False
 
         for indexval, idxty in zip(indices, index_types):
             if idxty is types.ellipsis:
+                # Even an ellipsis spanning zero axes separates advanced
+                # groups in NumPy's placement rule.
+                in_subspace = False
                 # Fill up missing dimensions at the middle
                 n_missing = aryty.ndim - len(indices) + 1 + num_newaxes
                 for i in range(n_missing):
@@ -1189,36 +1108,43 @@ class FancyIndexer(object):
 
             # Regular index value
             if isinstance(idxty, types.SliceType):
+                in_subspace = False
                 slice = context.make_helper(builder, idxty, indexval)
                 indexer = SliceIndexer(context, builder, aryty, ary, ax,
                                        idxty, slice)
                 indexers.append(indexer)
+                new_ax += 1
             elif isinstance(idxty, types.Integer):
                 ind = fix_integer_index(context, builder, idxty, indexval,
                                         self.shapes[ax])
                 indexer = IntegerIndexer(context, builder, ind)
                 indexers.append(indexer)
-                new_ax -= 1
             elif isinstance(idxty, types.Array):
+                has_array_index = True
                 idxary = make_array(idxty)(context, builder, indexval)
                 if isinstance(idxty.dtype, types.Integer):
                     indexer = IntegerArrayIndexer(context, builder,
                                                   idxty, idxary,
                                                   self.shapes[ax],
                                                   self.global_ary_idx_list)
-                elif isinstance(idxty.dtype, types.Boolean):
-                    indexer = BooleanArrayIndexer(context, builder,
-                                                  idxty, idxary)
                 else:
                     assert 0
                 indexers.append(indexer)
             elif is_nonelike(idxty):
+                in_subspace = False
                 self.newaxes.append(new_ax)
-                ax -= 1
+                new_ax += 1
+                continue
             else:
                 raise AssertionError("unexpected index type: %s" % (idxty,))
+            if isinstance(idxty, (types.Integer, types.Array)):
+                if not in_subspace:
+                    in_subspace = True
+                    num_subspaces += 1
+                if subspace_index is None:
+                    subspace_index = ax
+                    subspace_output_index = new_ax
             ax += 1
-            new_ax += 1
 
         # Fill up missing dimensions at the end
         assert ax <= aryty.ndim, (ax, aryty.ndim)
@@ -1233,24 +1159,19 @@ class FancyIndexer(object):
             context, builder, subspace_shape_tuple, self.global_ary_idx_list
         )
 
-        num_subspaces = 0
-        in_subspace = False
-        subspace_index = None
-        if any([isinstance(i, IntegerArrayIndexer) for i in indexers]):
-            for idx, i in enumerate(indexers):
-                if isinstance(i, (IntegerArrayIndexer, IntegerIndexer)):
-                    if not in_subspace:
-                        in_subspace = True
-                        num_subspaces += 1
-                    if subspace_index is None:
-                        subspace_index = idx
-                else:
-                    if in_subspace:
-                        in_subspace = False
-
-            if num_subspaces:
-                if num_subspaces > 1:
-                    subspace_index = 0
+        if has_array_index:
+            if num_subspaces > 1:
+                subspace_index = 0
+                subspace_output_index = 0
+            # New axes are basic output dimensions. Shift those at or after
+            # the insertion point by the complete broadcast subspace rank.
+            self.newaxes = [
+                position + (len(subspace_shape_tuple)
+                            if position >= subspace_output_index else 0)
+                for position in self.newaxes
+            ]
+        else:
+            subspace_index = None
 
         self.subspace_index = subspace_index
         self.indexers = indexers
@@ -1302,10 +1223,13 @@ class FancyIndexer(object):
         one = self.ll_intp(1)
         lower = zero
         upper = zero
-        for indexer, shape, stride in zip(self.indexers, self.indexers_shape,
-                                          strides):
+        # Emptiness belongs to the output shape; physical bounds belong to
+        # the original source axes.  Integer and advanced indices can remove
+        # or combine axes, so these two sequences cannot be zipped together.
+        for shape in self.indexers_shape:
             is_empty = builder.or_(is_empty,
                                    builder.icmp_unsigned('==', shape, zero))
+        for indexer, stride in zip(self.indexers, strides):
             # Compute [lower, upper) indices on this dimension
             lower_index, upper_index = indexer.get_index_bounds()
             lower_offset = builder.mul(stride, lower_index)
@@ -1384,8 +1308,96 @@ def get_subspace_shape(context, builder, array_indices):
     return subspace_shape
 
 
+@functools.lru_cache(maxsize=None)
+def _boolean_indexing_impl(ndim, index_types, is_setitem):
+    """Build an ordinary compiled indexing expression with integer masks.
+
+    Boolean masks index the positions of their true entries. Canonicalizing
+    them before entering the integer-index lowering gives them the same
+    broadcast subspace and axis-placement rules as other advanced indices.
+    Compiling this wrapper also lets normal NRT ownership manage the arrays
+    returned by nonzero, including masks that alias an assignment target.
+    """
+    arguments = "ary, indices, value" if is_setitem else "ary, indices"
+    lines = [f"def impl({arguments}):"]
+    normalized = []
+    conversions = []
+    axis = 0
+    consumed = 0
+    for ty in index_types:
+        if ty is types.ellipsis or is_nonelike(ty):
+            continue
+        consumed += (ty.ndim if isinstance(ty, types.Array)
+                     and isinstance(ty.dtype, types.Boolean) else 1)
+    missing = ndim - consumed
+    # Validate all mask axes before constructing any temporary index arrays.
+    for position, idxty in enumerate(index_types):
+        expression = f"indices[{position}]"
+        if idxty is types.ellipsis:
+            axis += missing
+        elif not is_nonelike(idxty):
+            if (isinstance(idxty, types.Array)
+                    and isinstance(idxty.dtype, types.Boolean)):
+                for dimension in range(idxty.ndim):
+                    length = f"{expression}.shape[{dimension}]"
+                    lines.extend([
+                        f"    if {length} != 0 and "
+                        f"{length} != ary.shape[{axis + dimension}]:",
+                        "        raise IndexError("
+                        "'boolean index did not match indexed array')",
+                    ])
+                name = f"mask_indices_{position}"
+                conversions.append(f"    {name} = np.nonzero({expression})")
+                normalized.extend(f"{name}[{dim}]" for dim in range(idxty.ndim))
+                axis += idxty.ndim
+                continue
+            axis += 1
+        normalized.append(expression)
+
+    lines.extend(conversions)
+    index = "(" + ", ".join(normalized) + ",)"
+    if is_setitem:
+        lines.append(f"    ary[{index}] = value")
+    else:
+        lines.append(f"    return ary[{index}]")
+    namespace = {"np": np}
+    exec("\n".join(lines), namespace)
+    return namespace["impl"]
+
+
+def _lower_boolean_indexing(context, builder, aryty, ary, index_types,
+                            indices, result_type, source=None):
+    """Delegate boolean indexing to a typed, NRT-managed integer expression."""
+    index_types = tuple(index_types)
+    index_tuple_type = types.BaseTuple.from_types(index_types)
+    index_tuple = context.make_tuple(builder, index_tuple_type, indices)
+    argtypes = (aryty, index_tuple_type)
+    arguments = (ary._getvalue(), index_tuple)
+    if source is not None:
+        source_type, source_value = source
+        argtypes += (source_type,)
+        arguments += (source_value,)
+    implementation = _boolean_indexing_impl(
+        aryty.ndim, index_types, source is not None
+    )
+    return context.compile_internal(
+        builder, implementation, signature(result_type, *argtypes), arguments
+    )
+
+
+def _has_boolean_indices(index_types):
+    return any(isinstance(ty, types.Array)
+               and isinstance(ty.dtype, types.Boolean) for ty in index_types)
+
+
 def fancy_getitem(context, builder, sig, args,
                   aryty, ary, index_types, indices):
+
+    if _has_boolean_indices(index_types):
+        return _lower_boolean_indexing(
+            context, builder, aryty, ary, index_types, indices,
+            sig.return_type,
+        )
 
     shapes = cgutils.unpack_tuple(builder, ary.shape)
     strides = cgutils.unpack_tuple(builder, ary.strides)
@@ -1986,6 +1998,11 @@ def fancy_setslice(context, builder, sig, args, index_types, indices):
     ary, _, src = args
 
     ary = make_array(aryty)(context, builder, ary)
+    if _has_boolean_indices(index_types):
+        return _lower_boolean_indexing(
+            context, builder, aryty, ary, index_types, indices,
+            sig.return_type, source=(srcty, src),
+        )
     dest_shapes = cgutils.unpack_tuple(builder, ary.shape)
     dest_strides = cgutils.unpack_tuple(builder, ary.strides)
     dest_data = ary.data

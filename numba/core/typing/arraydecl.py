@@ -90,9 +90,18 @@ def get_array_index_type(ary, idx):
                 in_subspace = True
         elif (isinstance(ty, types.Array)
               and isinstance(ty.dtype, (types.Integer, types.Boolean))):
-            array_indices.append(ty.ndim)
+            if isinstance(ty.dtype, types.Boolean):
+                if ty.ndim == 0:
+                    raise NumbaTypeError(
+                        "Zero-dimensional boolean array indices are not supported")
+                # A mask consumes one source axis per mask dimension, but
+                # nonzero represents its selected positions by 1-D arrays.
+                array_indices.append(1)
+                ndim -= ty.ndim
+            else:
+                array_indices.append(ty.ndim)
+                ndim -= 1
             advanced = True
-            ndim -= 1
             if not in_subspace:
                 num_subspaces += 1
                 in_subspace = True
@@ -118,6 +127,9 @@ def get_array_index_type(ary, idx):
         del right_indices[0]
 
     n_indices = len(all_indices) - ellipsis_met - num_newaxis
+    n_indices += sum(ty.ndim - 1 for ty in all_indices
+                     if isinstance(ty, types.Array)
+                     and isinstance(ty.dtype, types.Boolean))
     if n_indices > ary.ndim:
         raise NumbaTypeError("cannot index %s with %d indices: %s"
                              % (ary, n_indices, idx))

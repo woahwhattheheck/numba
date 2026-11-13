@@ -371,7 +371,15 @@ An example of this is as follows:
     print(np.allclose(shifted_subspace(a, b, c), shifted_subspace.py_func(a, b, c)))
     # Output: True
 
-Resrictions on the indices are the same as in NumPy, meaning that the indices must be within bounds of
+Boolean array masks with one or more dimensions are also supported. Each mask
+consumes the corresponding source dimensions and behaves like the integer
+index arrays returned by ``numpy.nonzero(mask)``. Multiple masks and integer
+index arrays broadcast together; their selected entries are paired, rather
+than forming a Cartesian product. Boolean mask dimensions must match the
+indexed dimensions, with NumPy's exception for zero-length mask dimensions.
+Zero-dimensional boolean array indices are not supported.
+
+Restrictions on integer indices are the same as in NumPy, meaning that the indices must be within bounds of
 the array dimensions and must be of integer type. Additionally, the number of fancy indices must not
 exceed the number of dimensions in the array being indexed as well as the indices must be broadcastable
 to a common shape.
