@@ -1,0 +1,1 @@
+{"source": "https://github.com/numba/numba/pull/10955", "expected": [[3, 7, 1, 0, 0, 0, 0, 0], [4, 3, 4, 4, 6, 5, 0, 0]], "actual": [[3, 7, 1, 0, 0, 0, 0, 0], [4, 3, 4, 4, 6, 5, 0, 0]], "equal": true}

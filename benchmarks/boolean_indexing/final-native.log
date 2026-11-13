@@ -1,0 +1,14 @@
+test_broadcast_mask_and_integer_indices (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_broadcast_mask_and_integer_indices) ... ok
+test_mask_aliases_assignment_target (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_mask_aliases_assignment_target) ... ok
+test_multidimensional_mask (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_multidimensional_mask) ... ok
+test_overlapping_row_assignment (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_overlapping_row_assignment) ... ok
+test_paired_masks (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_paired_masks) ... ok
+test_parallel_multidimensional_assignment (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_parallel_multidimensional_assignment) ... ok
+test_separated_mask_placement (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_separated_mask_placement) ... ok
+test_strided_readonly_mask (numba.tests.test_fancy_indexing.TestBooleanFancyIndexing.test_strided_readonly_mask) ... ok
+test_invalid_boolean_indices (numba.tests.test_fancy_indexing.TestBooleanFancyIndexErrors.test_invalid_boolean_indices) ... ok
+
+----------------------------------------------------------------------
+Ran 9 tests in 23.620s
+
+OK
